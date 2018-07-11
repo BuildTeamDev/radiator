@@ -10,6 +10,60 @@
 
 Radiator is an API Client for interaction with the STEEM network using Ruby.
 
+#### Changes in v0.4.0
+
+* Gem updates
+* **AppBase Support**
+  * Defaulting to `condenser_api.*` in `Radiator::Api` (see below)
+  * Handle/recover from new `AppBase` errors.
+* `Radiator::Stream` now detects if it's stalled and takes action if it has to wait too long for a new block.
+  1. Exponential back-off for stalls so that the node doesn't get slammed.
+  2. Short delays (3 times block production) only result in a warning.
+  3. Long delays (6 times block production) may try to switch to an alternate node.
+* Fixed internal logging bug that would open too many files.
+  * This fix also mitigates issues like `SSL Verify` problems (similar to [#12](https://github.com/inertia186/radiator/issues/12))
+* Dropped GOLOS support.
+
+**Appbase is now supported.**
+
+If you were already using `Radiator::Api` then there is nothing to change.  But if you made use of other API classes, like `Radiator::FollowApi`, then the method signatures have changed.
+
+**Pre-AppBase:**
+
+```ruby
+api = Radiator::FollowApi.new
+
+api.get_followers('inertia', 0, 'blog', 10)
+```
+
+**New Signature:**
+
+```ruby
+api = Radiator::FollowApi.new
+
+api.get_followers(account: 'inertia', start: 0, type: 'blog', limit: 10)
+```
+
+*-- or --*
+
+**Switch to Condenser API:**
+
+The other strategy for using this version of Radiator is to just switch away from classes like `Radiator::FollowApi` over to `Radiator::Api` (also known as `Radiator::CondenserApi`) instead.  Then you don't have to update individual method calls.
+
+```ruby
+api = Radiator::Api.new
+
+api.get_followers('inertia', 0, 'blog', 10)
+```
+
+**Note about GOLOS**
+
+GOLOS is no longer supported in Radiator.  If you want to continue to use GOLOS, you'll need to branch from v0.3.15 (pre-appbase) and add WebSockets support because GOLOS completely dropped JSON-RPC over HTTP clients support for some reason 
+
+Radiator has never and will never use WebSockets due to its server scalability requirements.
+
+From a client perspective, WebSockets is *great*.  **I have nothing against WebSockets.**  So I might get around to it at some point, but GOLOS won't be part of Radiator anymore mainly because GOLOS has no plans to implement AppBase.
+
 #### Changes in v0.3.0
 
 * Gem updates
@@ -86,7 +140,7 @@ api = Radiator::Api.new
 api.get_dynamic_global_properties do |properties|
   properties.virtual_supply
 end
-=> "135377049.603 STEEM"
+=> "271342874.337 STEEM"
 ```
 
 ... or ...
@@ -97,14 +151,14 @@ require 'radiator'
 api = Radiator::Api.new
 response = api.get_dynamic_global_properties
 response.result.virtual_supply
-=> "135377049.603 STEEM"
+=> "271342874.337 STEEM"
 ```
 
 #### Follower API
 
 ```ruby
 api = Radiator::FollowApi.new
-api.get_followers('inertia', 0, 'blog', 100) do |followers|
+api.get_followers(account: 'inertia', start: 0, type: 'blog', limit: 100) do |followers|
   followers.map(&:follower)
 end
 => ["a11at",
@@ -371,24 +425,6 @@ tx.operations << transfer
 tx.process(true)
 ```
 
-#### Golos
-
-Radiator also supports Golos.  To use the Golos blockchain, provide a node and chain_id:
-
-```ruby
-tx = Radiator::Transaction.new(wif: 'Your Wif Here', chain: :golos, url: 'https://ws.golos.io')
-vote = {
-  type: :vote,
-  voter: 'xeroc',
-  author: 'xeroc',
-  permlink: 'piston',
-  weight: 10000
-}
-
-tx.operations << vote
-tx.process(true)
-```
-
 There's a complete list of operations known to Radiator in [`broadcast_operations.json`](https://github.com/inertia186/radiator/blob/master/lib/radiator/broadcast_operations.json).
 
 ## Failover
@@ -400,7 +436,7 @@ options = {
   url: 'https://api.steemit.com',
   failover_urls: [
     'https://api.steemitstage.com',
-    'https://gtg.steem.house:8090'
+    'https://api.steem.house'
   ]
 }
 
@@ -419,22 +455,6 @@ There is another rare scenario involving `::Transaction` broadcasts that's handl
 
 ```ruby
 tx = Radiator::Transaction.new(wif: wif, recover_transactions_on_error: false)
-```
-
-### Golos Failover Examples
-
-Typically, you only need to pass `chain: :golos` to enable Golos.  Failover is enabled by default.  If you want to provide your own full nodes, use this format:
-
-```ruby
-options = {
-  chain: :golos,
-  url: 'https://ws.golos.io',
-  failover_urls: [
-    'https://api.golos.cf'
-  ]
-}
-
-api = Radiator::Api.new(options)
 ```
 
 ## Debugging
@@ -481,6 +501,34 @@ If you have excluded system resources as the root cause, then you should take a 
 
 Verify your code is not doing too much between blocks.
 
+## Problem: I'm getting an endless loop: `#<OpenSSL::SSL::SSLError: SSL_connect SYSCALL returned=5 errno=0 state=error: certificate verify failed>`
+
+## Solution:
+
+You're probably creating too many threads or you don't have enough resources for what you're doing.  One option for you is to avoid persistent HTTP by passing `persist: false`.
+
+Doing this will impact performance because each API call will be a separate socket call.  All of the constructors accept `persist: false`., e.g.:
+
+```ruby
+api = Radiator::Api.new(persist: false)
+```
+
+... or ...
+
+```ruby
+stream = Radiator::Stream.new(persist: false)
+```
+
+... or ...
+
+```ruby
+tx = Radiator::Transaction.new(options.merge(persist: false, wif: wif))
+```
+
+Also see troubleshooting discussion about this situation:
+
+https://github.com/inertia186/radiator/issues/12
+
 ## Tests
 
 * Clone the client repository into a directory of your choice:
@@ -493,15 +541,14 @@ Verify your code is not doing too much between blocks.
   * `HELL_ENABLED=true rake`
 * To run a stream test on the live STEEM blockchain with debug logging enabled:
   * `LOG=DEBUG rake test_live_stream`
-* To run a stream test on the live GOLOS blockchain with debug logging enabled:
-  * `LOG=DEBUG rake test_live_stream[golos]`
+
 ---
 
 <center>
   <img src="http://www.steemimg.com/images/2016/08/19/RadiatorCoolingFan-54in-Webfdcb1.png" />
 </center>
 
-See my previous Ruby How To posts in: [/f/ruby](https://chainbb.com/f/ruby)
+See my previous Ruby How To posts in: [#radiator](https://steemit.com/created/radiator) [#ruby](https://steemit.com/created/ruby)
 
 ## Get in touch!
 
